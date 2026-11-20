@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import { BlobReader, BlobWriter, configure, Entry, FileEntry, TextWriter, ZipReader } from "@zip.js/zip.js";
+import { folderSource, readText, zipSource, type FolderFile, type PackageSource, type SourceEntry } from "./source";
 import {
 	ActivityState,
 	ChannelMeta,
@@ -15,9 +15,7 @@ import {
 	SearchOptions,
 	Summary
 } from "../lib/types";
-import { compareSnowflake, parseAttachment, parseCsv, snowflakeToMs } from "../lib/util";
-
-configure({ useWebWorkers: false });
+import { compareSnowflake, IMAGE_EXTS, parseAttachment, parseCsv, snowflakeToMs } from "../lib/util";
 
 interface Msg {
 	id: string;
@@ -45,6 +43,8 @@ let messageById = new Map<string, Msg>();
 let images: ImageRef[] = [];
 let lastResults: Msg[] = [];
 let attIndex = new Map<string, ImageRef[]>();
+let source: PackageSource | null = null;
+let guildsPromise: Promise<GuildsResult> | null = null;
 
 function post(event: string, data: unknown) {
 	ctx.postMessage({ event, data });
@@ -54,44 +54,47 @@ function progress(p: Progress) {
 	post("progress", p);
 }
 
-function fileEntry(e: Entry | undefined): FileEntry | undefined {
-	return e && !e.directory ? (e as FileEntry) : undefined;
+async function readJson<T>(src: PackageSource, e: SourceEntry): Promise<T> {
+	return JSON.parse(await readText(src, e)) as T;
 }
 
-async function readText(e: FileEntry): Promise<string> {
-	return e.getData(new TextWriter());
-}
-
-async function readJson<T>(e: FileEntry): Promise<T> {
-	return JSON.parse(await readText(e)) as T;
-}
-
-// Streams an entry line by line; returning early from the loop cancels decompression.
-async function* readLines(e: FileEntry, onBytes?: (chars: number) => void): AsyncGenerator<string> {
-	const pipe = new TransformStream<BufferSource, BufferSource>();
-	const done = e.getData(pipe.writable).catch(() => undefined);
-	const reader = pipe.readable.pipeThrough(new TextDecoderStream()).getReader();
+// Streams an entry line by line; returning early from the loop cancels the read.
+async function* readLines(src: PackageSource, e: SourceEntry, onChars?: (chars: number) => void): AsyncGenerator<string> {
+	const reader = (await src.stream(e)).pipeThrough(new TextDecoderStream() as unknown as ReadableWritablePair<string, Uint8Array>).getReader();
 	let buf = "";
 	let finished = false;
 	try {
 		while (true) {
-			const { value, done: end } = await reader.read();
-			if (end) break;
-			onBytes?.(value.length);
+			const { value, done } = await reader.read();
+			if (done) break;
+			onChars?.(value.length);
 			buf += value;
+			let from = 0;
 			let nl: number;
-			while ((nl = buf.indexOf("\n")) >= 0) {
-				const line = buf.slice(0, nl).replace(/\r$/, "");
-				buf = buf.slice(nl + 1);
-				if (line) yield line;
+			while ((nl = buf.indexOf("\n", from)) >= 0) {
+				const end = nl > from && buf.charCodeAt(nl - 1) === 13 ? nl - 1 : nl;
+				if (end > from) yield buf.slice(from, end);
+				from = nl + 1;
 			}
+			buf = buf.slice(from);
 		}
 		if (buf.trim()) yield buf;
 		finished = true;
 	} finally {
 		if (!finished) await reader.cancel().catch(() => undefined);
-		await done;
 	}
+}
+
+// Cheap image check used while loading (parseAttachment does more work than needed here).
+function isImageUrl(url: string): boolean {
+	const q = url.indexOf("?");
+	const path = q >= 0 ? url.slice(0, q) : url;
+	const dot = path.lastIndexOf(".");
+	return dot >= 0 && IMAGE_EXTS.has(path.slice(dot + 1).toLowerCase());
+}
+
+export interface LoadOptions {
+	attachmentsOnly: boolean;
 }
 
 interface RawUser {
@@ -138,33 +141,36 @@ function normalizeRecipients(rc: RawChannel): string[] {
 	return (rc.recipients ?? []).map((r) => (r === "Deleted User" ? DELETED_USER_ID : String(r)));
 }
 
-async function load(file: File, deletedIds: string[]): Promise<Summary> {
+async function load(input: File | FolderFile[], deletedIds: string[], opts: LoadOptions): Promise<Summary> {
 	const started = performance.now();
 	channels = [];
 	messageById = new Map();
 	images = [];
 	lastResults = [];
 	attIndex = new Map();
+	guildsPromise = null;
 
-	const zip = new ZipReader(new BlobReader(file));
-	let entries: Entry[];
-	try {
-		entries = await zip.getEntries();
-	} catch {
-		throw new Error("This file isn't a readable zip archive. Select the package.zip that Discord emailed you.");
-	}
-	const byName = new Map<string, Entry>();
-	for (const e of entries) byName.set(e.filename.toLowerCase(), e);
-	const get = (name: string) => fileEntry(byName.get(name.toLowerCase()));
-
-	const index = get("messages/index.json");
-	if (!index) throw new Error("Invalid data package: missing messages/index.json");
-	const creationTime = index.lastModDate?.getTime() ?? Date.now();
+	const src = Array.isArray(input) ? folderSource(input) : await zipSource(input);
+	source = src;
+	const entries = src.entries;
+	const byName = new Map<string, SourceEntry>();
+	for (const e of entries) byName.set(e.path.toLowerCase(), e);
+	const get = (name: string) => byName.get(name.toLowerCase());
 
 	const channelEntryRe = /^messages\/(c?\d+)\/channel\.json$/i;
 	const messagesEntryRe = /^messages\/(c?\d+)\/messages\.(csv|json)$/i;
 	const avatarRe = /^account\/avatar\.[a-z]+$/i;
-	const total = entries.length;
+	const messageEntries = entries.filter((e) => messagesEntryRe.test(e.path));
+	if (!messageEntries.length) {
+		throw new Error(
+			Array.isArray(input)
+				? "No messages found in that folder. Pick the extracted package folder (or its messages folder)."
+				: "Invalid data package: no messages folder found."
+		);
+	}
+	const index = get("messages/index.json");
+	const creationTime = (index ?? messageEntries[0]).lastModified || Date.now();
+	const total = messageEntries.length;
 
 	// Account
 	let user: PkgUser;
@@ -174,7 +180,7 @@ async function load(file: File, deletedIds: string[]): Promise<Summary> {
 	const users: Record<string, PkgUser> = {};
 	const userEntry = get("account/user.json");
 	if (userEntry) {
-		const raw = await readJson<RawUser>(userEntry);
+		const raw = await readJson<RawUser>(src, userEntry);
 		user = toUser(raw);
 		notes = raw.notes ?? {};
 		for (const r of raw.relationships ?? []) {
@@ -188,13 +194,13 @@ async function load(file: File, deletedIds: string[]): Promise<Summary> {
 		// Partial package: guess our id as the most common DM recipient.
 		partialUser = true;
 		const counts = new Map<string, number>();
+		const channelEntries = entries.filter((e) => channelEntryRe.test(e.path));
 		let i = 0;
-		for (const e of entries) {
+		for (const e of channelEntries) {
 			i++;
-			if (i % 200 === 0) progress({ phase: "messages", done: i, total, label: "Working out your user ID" });
-			const fe = fileEntry(e);
-			if (!fe || !channelEntryRe.test(fe.filename)) continue;
-			const rc = await readJson<RawChannel>(fe);
+			if (i % 200 === 0) progress({ phase: "messages", done: i, total: channelEntries.length, label: "Working out your user ID" });
+			const rc = await readJson<RawChannel>(src, e).catch(() => null);
+			if (!rc) continue;
 			if (channelType(rc.type) !== ChannelType.DM) continue;
 			for (const id of normalizeRecipients(rc)) {
 				if (id !== DELETED_USER_ID) counts.set(id, (counts.get(id) ?? 0) + 1);
@@ -214,33 +220,48 @@ async function load(file: File, deletedIds: string[]): Promise<Summary> {
 		user = { id: best, username: "You", globalName: "You", discriminator: "0" };
 	}
 
-	const channelNames = await readJson<Record<string, string>>(index).catch(() => ({} as Record<string, string>));
+	const channelNames = index ? await readJson<Record<string, string>>(src, index).catch(() => ({} as Record<string, string>)) : {};
 	const guildsIndex = get("servers/index.json");
-	const guildNames = guildsIndex ? await readJson<Record<string, string>>(guildsIndex).catch(() => ({})) : {};
+	const guildNames = guildsIndex ? await readJson<Record<string, string>>(src, guildsIndex).catch(() => ({})) : {};
 
 	const dmNameRe = /^Direct Message with (.+?)(?:#(\d{1,4}))?$/;
 	const deleted = new Set(deletedIds);
 	let avatar: Blob | undefined;
 	let totalMessages = 0;
-	let processed = 0;
 
-	for (const e of entries) {
-		processed++;
-		if (processed % 50 === 0) progress({ phase: "messages", done: processed, total, label: `Reading ${e.filename}` });
-		const fe = fileEntry(e);
-		if (!fe) continue;
+	const avatarEntry = entries.find((e) => avatarRe.test(e.path));
+	if (avatarEntry) {
+		const ext = avatarEntry.path.split(".").pop()!.toLowerCase().replace("jpg", "jpeg");
+		avatar = new Blob([(await src.bytes(avatarEntry)) as BlobPart], { type: `image/${ext}` });
+	}
 
-		if (avatarRe.test(fe.filename)) {
-			avatar = await fe.getData(new BlobWriter(/png|gif|jpe?g|webp/i.test(fe.filename) ? `image/${fe.filename.split(".").pop()!.toLowerCase().replace("jpg", "jpeg")}` : undefined));
-			continue;
-		}
+	// Keep several reads in flight: on a phone each file read is slow, parsing is not.
+	const LOOKAHEAD = 8;
+	const read = (e: SourceEntry) => {
+		const m = messagesEntryRe.exec(e.path)!;
+		const chEntry = get(`messages/${m[1]}/channel.json`);
+		// One unreadable channel is skipped rather than failing the whole package.
+		return Promise.all([chEntry ? readText(src, chEntry).catch(() => null) : Promise.resolve(null), readText(src, e).catch(() => "")]);
+	};
+	const pending: Promise<[string | null, string]>[] = [];
+	for (let k = 0; k < Math.min(LOOKAHEAD, total); k++) pending.push(read(messageEntries[k]));
 
-		const m = messagesEntryRe.exec(fe.filename);
-		if (!m) continue;
+	for (let processed = 0; processed < total; processed++) {
+		const fe = messageEntries[processed];
+		const [chText, text] = await pending.shift()!;
+		if (processed + LOOKAHEAD < total) pending.push(read(messageEntries[processed + LOOKAHEAD]));
+		if (processed % 25 === 0) progress({ phase: "messages", done: processed, total, label: "Reading messages" });
+
+		if (!text) continue;
+		const m = messagesEntryRe.exec(fe.path)!;
 		const folder = m[1];
 		const channelId = folder.replace(/^c/i, "");
-		const chEntry = get(`messages/${folder}/channel.json`);
-		const rc: RawChannel = chEntry ? await readJson<RawChannel>(chEntry) : { id: channelId, type: 0 };
+		let rc: RawChannel = { id: channelId, type: 0 };
+		try {
+			if (chText) rc = JSON.parse(chText);
+		} catch {
+			// keep the fallback
+		}
 		const type = channelType(rc.type);
 		const meta: ChannelMeta = {
 			id: String(rc.id ?? channelId),
@@ -265,9 +286,9 @@ async function load(file: File, deletedIds: string[]): Promise<Summary> {
 		if (!meta.name && indexName) meta.fallbackName = indexName;
 
 		const rec: ChannelRec = { meta, msgs: [] };
-		const text = await readText(fe);
 		const add = (id: string, content: string, attachments: string) => {
 			if (!id) return;
+			if (opts.attachmentsOnly && !attachments) return;
 			const msg: Msg = {
 				id,
 				ts: snowflakeToMs(id),
@@ -286,7 +307,12 @@ async function load(file: File, deletedIds: string[]): Promise<Summary> {
 				add(row[0], row[2], row[3] ?? "");
 			}
 		} else {
-			const arr = JSON.parse(text) as Record<string, unknown>[];
+			let arr: Record<string, unknown>[] = [];
+			try {
+				arr = JSON.parse(text);
+			} catch {
+				// A damaged channel file shouldn't stop the rest of the package loading.
+			}
 			for (const o of arr) {
 				add(String(o.ID ?? o.id ?? ""), String(o.Contents ?? o.contents ?? ""), String(o.Attachments ?? o.attachments ?? ""));
 			}
@@ -300,7 +326,7 @@ async function load(file: File, deletedIds: string[]): Promise<Summary> {
 					const refs = attIndex.get(url);
 					if (refs) refs.push(ref);
 					else attIndex.set(url, [ref]);
-					if (parseAttachment(url).kind === "image") images.push(ref);
+					if (isImageUrl(url)) images.push(ref);
 				});
 			}
 		}
@@ -308,7 +334,6 @@ async function load(file: File, deletedIds: string[]): Promise<Summary> {
 		totalMessages += rec.msgs.length;
 		channels.push(rec);
 	}
-	await zip.close();
 
 	// Flag users with more than one DM channel (old bug allowed duplicate DMs).
 	const dmByUser = new Map<string, ChannelRec[]>();
@@ -328,14 +353,6 @@ async function load(file: File, deletedIds: string[]): Promise<Summary> {
 
 	progress({ phase: "messages", done: total, total, label: "Done" });
 
-	// Activity is parsed afterwards so the UI is usable immediately.
-	setTimeout(() => {
-		loadGuilds(file).then(
-			(r) => post("guilds", r),
-			(err) => post("guildsError", String(err?.message ?? err))
-		);
-	}, 0);
-
 	return {
 		user,
 		partialUser,
@@ -349,7 +366,9 @@ async function load(file: File, deletedIds: string[]): Promise<Summary> {
 		totalImages: images.length,
 		creationTime,
 		unsignedLinks,
-		loadMs: performance.now() - started
+		loadMs: performance.now() - started,
+		attachmentsOnly: opts.attachmentsOnly,
+		hasActivity: entries.some((e) => /^activity\/(reporting|modeling|analytics)\/events.+\.json$/i.test(e.path))
 	};
 }
 
@@ -378,31 +397,26 @@ function eventTs(e: RawEvent): number {
  * in between, use reporting if the account registered in 2024 or has pre-2024 events.
  * If analytics is missing, fall back to modeling, then reporting.
  */
-async function loadGuilds(file: File): Promise<GuildsResult> {
-	const zip = new ZipReader(new BlobReader(file));
-	const entries = await zip.getEntries();
-	const parts: Record<"reporting" | "modeling" | "analytics", FileEntry[]> = { reporting: [], modeling: [], analytics: [] };
-	for (const e of entries) {
-		const fe = fileEntry(e);
-		if (!fe) continue;
-		const m = /activity\/(reporting|modeling|analytics)\/events.+\.json$/i.exec(fe.filename);
-		if (m) parts[m[1].toLowerCase() as keyof typeof parts].push(fe);
+async function loadGuilds(src: PackageSource): Promise<GuildsResult> {
+	const parts: Record<"reporting" | "modeling" | "analytics", SourceEntry[]> = { reporting: [], modeling: [], analytics: [] };
+	for (const e of src.entries) {
+		const m = /^activity\/(reporting|modeling|analytics)\/events.+\.json$/i.exec(e.path);
+		if (m) parts[m[1].toLowerCase() as keyof typeof parts].push(e);
 	}
-	for (const list of Object.values(parts)) list.sort((a, b) => a.filename.localeCompare(b.filename));
+	for (const list of Object.values(parts)) list.sort((a, b) => a.path.localeCompare(b.path));
 	const reporting = parts.reporting[0];
 	const modeling = parts.modeling.length ? parts.modeling : undefined;
 	const analytics = parts.analytics.length ? parts.analytics : undefined;
 
 	const result: GuildsResult = { guilds: [], state: "ok", missingData: null };
 	if (!reporting) {
-		await zip.close();
 		result.state = "none";
 		return result;
 	}
 
 	type Pick = "analytics" | "modeling" | "reporting";
 	let pick: Pick = "analytics";
-	const created = reporting.lastModDate.getTime();
+	const created = reporting.lastModified;
 	const start = new Date(2024, 4, 1).getTime();
 	const end = new Date(2024, 5, 30).getTime();
 
@@ -415,11 +429,11 @@ async function loadGuilds(file: File): Promise<GuildsResult> {
 		const ignore = ["payment_", "subscription_"];
 		let read = 0;
 		let lastReport = 0;
-		for await (const line of readLines(reporting, (n) => {
+		for await (const line of readLines(src, reporting, (n) => {
 			read += n;
 			if (read - lastReport > 2_000_000) {
 				lastReport = read;
-				progress({ phase: "guilds", done: read, total: reporting.uncompressedSize, label: "Checking activity history" });
+				progress({ phase: "guilds", done: read, total: reporting.size, label: "Checking activity history" });
 			}
 		})) {
 			let ev: RawEvent;
@@ -455,7 +469,7 @@ async function loadGuilds(file: File): Promise<GuildsResult> {
 	}
 
 	const files = pick === "analytics" ? analytics! : pick === "modeling" ? modeling! : parts.reporting;
-	const totalSize = files.reduce((n, f) => n + f.uncompressedSize, 0);
+	const totalSize = files.reduce((n, f) => n + f.size, 0);
 	const joined = new Map<string, GuildJoin>();
 	const accepted: { guild: string; invite?: string; ts: number }[] = [];
 	const prefixes = [
@@ -474,7 +488,7 @@ async function loadGuilds(file: File): Promise<GuildsResult> {
 		}
 	};
 	for (const entry of files)
-	for await (const line of readLines(entry, onBytes)) {
+	for await (const line of readLines(src, entry, onBytes)) {
 		if (!prefixes.some((p) => line.startsWith(p))) continue;
 		let ev: RawEvent;
 		try {
@@ -521,7 +535,6 @@ async function loadGuilds(file: File): Promise<GuildsResult> {
 				break;
 		}
 	}
-	await zip.close();
 
 	accepted.sort((a, b) => a.ts - b.ts);
 	for (const a of accepted) {
@@ -632,6 +645,15 @@ function updateUrls(map: Record<string, string>) {
 
 const handlers: Record<string, (...args: any[]) => unknown> = {
 	load,
+	// Activity logs can be gigabytes, so they're only read when the Servers tab asks.
+	loadGuilds: () => {
+		if (!source) throw new Error("No package loaded");
+		guildsPromise ??= loadGuilds(source).catch((err) => {
+			guildsPromise = null;
+			throw err;
+		});
+		return guildsPromise;
+	},
 	search,
 	results: (offset: number, limit: number) => lastResults.slice(offset, offset + limit).map(view),
 	resultIds: () => lastResults.filter((m) => !m.del).map((m) => `${m.ch.meta.id}:${m.id}`),

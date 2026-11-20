@@ -1,4 +1,4 @@
-import { useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import { useApp } from "../context";
 import { copyText } from "../lib/actions";
 import { discordUrl } from "../lib/discord";
@@ -10,6 +10,7 @@ export function ServersTab() {
 	const { guilds, guildsProgress, guildsError, summary } = app;
 	const [filter, setFilter] = useState("");
 	const [limit, setLimit] = useState(150);
+	useEffect(() => app.requestGuilds(), []);
 
 	// Message counts per server, from the messages folder.
 	const counts = useMemo(() => {

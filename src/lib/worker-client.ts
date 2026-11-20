@@ -8,8 +8,6 @@ type Promisified<T> = {
 
 export interface ParserClient extends Promisified<WorkerApi> {
 	onProgress(fn: Listener<Progress>): void;
-	onGuilds(fn: Listener<GuildsResult>): void;
-	onGuildsError(fn: Listener<string>): void;
 	terminate(): void;
 }
 
@@ -44,12 +42,10 @@ export function createParser(): ParserClient {
 			worker.postMessage({ id, method, args });
 		});
 
-	const methods = ["load", "search", "results", "resultIds", "images", "updateUrls", "setDeleted", "channelMessageCount"];
+	const methods = ["load", "loadGuilds", "search", "results", "resultIds", "images", "updateUrls", "setDeleted", "channelMessageCount"];
 	const client: Record<string, unknown> = {};
 	for (const m of methods) client[m] = call(m);
 	client.onProgress = (fn: Listener<Progress>) => listeners.progress.push(fn);
-	client.onGuilds = (fn: Listener<GuildsResult>) => listeners.guilds.push(fn);
-	client.onGuildsError = (fn: Listener<string>) => listeners.guildsError.push(fn);
 	client.terminate = () => worker.terminate();
 	return client as unknown as ParserClient;
 }

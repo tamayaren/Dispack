@@ -9,7 +9,7 @@ export function LoadingView({ name, progress }: { name: string; progress: Progre
 				<div class="bar" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
 					<div style={{ width: `${pct}%` }} />
 				</div>
-				<p class="muted ellipsis">{progress ? `${progress.label} (${progress.done.toLocaleString()} / ${progress.total.toLocaleString()} files)` : "Opening archive…"}</p>
+				<p class="muted ellipsis">{progress ? `${progress.label} (${progress.done.toLocaleString()} / ${progress.total.toLocaleString()} channels)` : "Opening package…"}</p>
 				<p class="fineprint">Large packages with a million messages can take a minute, and longer on phones.</p>
 			</div>
 		</main>

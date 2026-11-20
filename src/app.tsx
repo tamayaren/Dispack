@@ -5,7 +5,7 @@ import { loadDeleted, loadResolvedUsers, loadSettings, saveDeleted, saveResolved
 import type { GuildsResult, PkgUser, Progress, Summary } from "./lib/types";
 import { avatarUrl } from "./lib/util";
 import { createParser, type ParserClient } from "./lib/worker-client";
-import { Landing } from "./components/Landing";
+import { Landing, type OpenInput, type OpenOptions } from "./components/Landing";
 import { LoadingView } from "./components/LoadingView";
 import { Shell } from "./components/Shell";
 import { Toasts, type ToastMsg } from "./components/Toasts";
@@ -40,6 +40,8 @@ export function App() {
 	const [tab, setTab] = useState<Tab>("messages");
 	const [pendingSearch, setPendingSearch] = useState<{ ids: string[]; label: string; n: number } | null>(null);
 
+	const guildsRequested = useRef(false);
+
 	const toast = useCallback((msg: string, kind: ToastMsg["kind"] = "info") => {
 		const id = ++toastSeq;
 		setToasts((t) => [...t, { id, msg, kind }]);
@@ -66,28 +68,22 @@ export function App() {
 		if (!src || !src.startsWith("/")) return;
 		fetch(src)
 			.then((r) => r.blob())
-			.then((b) => openFile(new File([b], src.split("/").pop() || "package.zip")));
+			.then((b) => openSource({ kind: "zip", file: new File([b], src.split("/").pop() || "package.zip") }, { attachmentsOnly: false }));
 	}, []);
 
-	async function openFile(file: File) {
+	async function openSource(input: OpenInput, opts: OpenOptions) {
 		setError(null);
-		setLoading({ name: file.name, progress: null });
+		const name = input.kind === "zip" ? input.file.name : `folder (${input.files.length.toLocaleString()} files)`;
+		setLoading({ name, progress: null });
 		const parser = createParser();
 		parser.onProgress((p) => {
 			if (p.phase === "messages") setLoading((l) => (l ? { ...l, progress: p } : l));
 			else setGuildsProgress(p);
 		});
-		parser.onGuilds((g) => {
-			setGuilds(g);
-			setGuildsProgress(null);
-		});
-		parser.onGuildsError((e) => {
-			setGuildsError(e);
-			setGuildsProgress(null);
-		});
+		guildsRequested.current = false;
 		try {
 			// We don't know the account until user.json is read, so deleted IDs are applied afterwards.
-			const summary = await parser.load(file, []);
+			const summary = await parser.load(input.kind === "zip" ? input.file : input.files, [], opts);
 			const del = loadDeleted(summary.user.id);
 			if (del.length) await parser.setDeleted(del, true);
 			const av = summary.avatar ? URL.createObjectURL(summary.avatar) : avatarUrl(summary.user, 128);
@@ -184,6 +180,22 @@ export function App() {
 				setTab("messages");
 			},
 			setTab,
+			requestGuilds: () => {
+				if (guildsRequested.current) return;
+				guildsRequested.current = true;
+				setGuildsError(null);
+				parser.loadGuilds().then(
+					(g) => {
+						setGuilds(g);
+						setGuildsProgress(null);
+					},
+					(err) => {
+						guildsRequested.current = false;
+						setGuildsError((err as Error).message);
+						setGuildsProgress(null);
+					}
+				);
+			},
 			requireUserToken: () => {
 				if (!userToken) {
 					toast("Add your account token in Settings to use this.", "error");
@@ -202,7 +214,7 @@ export function App() {
 
 	let body;
 	if (loading) body = <LoadingView name={loading.name} progress={loading.progress} />;
-	else if (!ctx) body = <Landing onFile={openFile} error={error} />;
+	else if (!ctx) body = <Landing onOpen={openSource} error={error} />;
 	else
 		body = (
 			<Ctx.Provider value={ctx}>

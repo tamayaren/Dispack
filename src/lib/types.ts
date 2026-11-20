@@ -87,6 +87,8 @@ export interface Summary {
 	creationTime: number;
 	unsignedLinks: boolean;
 	loadMs: number;
+	attachmentsOnly: boolean;
+	hasActivity: boolean;
 }
 
 export interface GuildJoin {
@@ -136,7 +138,8 @@ export interface Progress {
 }
 
 export interface WorkerApi {
-	load(file: File, deletedIds: string[]): Summary;
+	load(input: File | { path: string; file: File }[], deletedIds: string[], opts: { attachmentsOnly: boolean }): Summary;
+	loadGuilds(): GuildsResult;
 	search(opts: SearchOptions): number;
 	results(offset: number, limit: number): MessageView[];
 	resultIds(): string[];

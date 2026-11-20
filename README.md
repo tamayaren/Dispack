@@ -6,12 +6,15 @@ It's a browser port of [Data Package Tool](https://github.com/aamiaa/Data-Packag
 
 ## Features
 
+- **Opens the zip or the extracted folder.** A folder can be the whole package or just part of it, such as `messages` or a single channel folder. Folders open with the folder picker or by dropping them on the page.
+- **Fast loading.** Dispack has its own zip reader that only reads the parts of the zip it needs. A synthetic 300,000-message package parses in about half a second on a desktop. The activity log, which is often the largest part of the package, is only read when you open the Servers tab.
+- **Images and files only**: an option that skips messages without attachments, for phones with less memory. Search then only covers those messages.
 - **Message search** in exact, all-words or regex mode, with case sensitivity, newest/oldest sorting, before/after dates, has image/video/file, server, DM and group DM filters, and include/exclude channel or server IDs.
 - **Image gallery** of every image you've sent, newest first, loaded as you scroll.
 - **Image viewer** with swipe, pinch and double-tap zoom on phones; arrow keys and wheel zoom on desktop. It shows the message text, channel and date, and can jump to the message.
 - **Saving images**: save one (the share sheet on phones, so it can go to Photos), select several, or save all of them as a zip. In Chromium desktop browsers, zips stream straight to disk.
 - **DMs**: every DM you've talked in, with message counts, first-DM date, notes and duplicate-DM warnings.
-- **Servers** joined, with join method, invite codes and analytics gaps, read from the activity log.
+- **Servers** joined, with join method, invite codes and analytics gaps, read from the activity log when you open the tab.
 - **Jump to message** in Discord (web, mobile app, desktop app, PTB or Canary).
 - **With an account token** (optional): delete messages, mass-delete search results, reopen lost DMs and look up deleted users.
 
@@ -27,7 +30,7 @@ The bot doesn't need to be in any server.
 
 ## Your data and tokens
 
-- The zip is read inside your browser by a Web Worker. Nothing is uploaded.
+- The zip or folder is read inside your browser by a Web Worker. Nothing is uploaded.
 - Tokens are kept in memory only and are gone when you reload. They're sent only to `discord.com`.
 - The built page has a Content-Security-Policy that only allows connections to `discord.com`, `cdn.discordapp.com` and `media.discordapp.net`.
 - Per-device preferences (search filters, and which messages you've deleted) live in `localStorage`.

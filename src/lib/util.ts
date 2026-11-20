@@ -3,12 +3,10 @@ import { AttachmentKind, AttachmentView, DISCORD_EPOCH, PkgUser } from "./types"
 export const IMAGE_EXTS = new Set(["png", "gif", "jpg", "jpeg", "apng", "jfif", "webp", "avif"]);
 export const VIDEO_EXTS = new Set(["mp4", "webm", "avi", "mov", "m4v"]);
 
+// Float maths instead of BigInt: precision loss is in the low bits, far below 1 ms.
 export function snowflakeToMs(id: string): number {
-	try {
-		return Number(BigInt(id) >> 22n) + DISCORD_EPOCH;
-	} catch {
-		return 0;
-	}
+	const n = Number(id);
+	return Number.isFinite(n) ? Math.floor(n / 4194304) + DISCORD_EPOCH : 0;
 }
 
 export function msToSnowflake(ms: number): string {

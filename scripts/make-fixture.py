@@ -1,6 +1,6 @@
 """Builds a synthetic Discord data package for local testing.
 
-Usage: python scripts/make-fixture.py [out.zip] [message_count]
+Usage: python scripts/make-fixture.py [out.zip] [message_count] [extra_server_channels]
 """
 import io
 import json
@@ -27,6 +27,7 @@ def ts_for(sf):
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "test-fixtures/package.zip"
     total = int(sys.argv[2]) if len(sys.argv) > 2 else 3000
+    extra = int(sys.argv[3]) if len(sys.argv) > 3 else 0
     friends = [
         {"id": str(200000000000000000 + i), "username": f"friend{i}", "global_name": f"Friend {i}", "discriminator": "0", "avatar": None}
         for i in range(8)
@@ -61,6 +62,11 @@ def main():
             cid = snowflake(start + random.randint(0, 900) * 86400000)
             channels.append({"id": cid, "type": 0, "name": name, "guild": {"id": gid, "name": gname}})
             index[cid] = f"{name} in {gname}"
+    for n in range(extra):
+        gid = "300000000000000001" if n % 2 else "300000000000000002"
+        cid = snowflake(start + random.randint(0, 1500) * 86400000)
+        channels.append({"id": cid, "type": 0, "name": f"channel-{n}", "guild": {"id": gid, "name": guilds[gid]}})
+        index[cid] = f"channel-{n} in {guilds[gid]}"
 
     words = "hello pixel rust borrow checker lunch tomorrow cat picture sprite palette shader compile error weekend game jam".split()
     img_urls = [f"https://cdn.discordapp.com/embed/avatars/{n}.png" for n in range(6)]

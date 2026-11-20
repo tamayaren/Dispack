@@ -1272,3 +1272,35 @@ a:focus-visible {
 	padding: 32px 16px;
 	text-align: center;
 }
+
+.dropzone {
+	cursor: default;
+}
+.open-buttons {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
+	gap: 8px;
+	margin: 6px 0;
+}
+.dropzone > span {
+	max-width: 520px;
+	text-align: center;
+	font-size: 0.9em;
+}
+.load-option {
+	align-items: flex-start;
+	margin-top: 12px;
+	background: var(--bg-2);
+	border-radius: var(--radius);
+	padding: 10px 14px;
+}
+.load-option input {
+	margin-top: 3px;
+	flex: none;
+}
+.load-note {
+	margin: 6px 0 0;
+	font-size: 0.85em;
+	color: var(--muted, inherit);
+}

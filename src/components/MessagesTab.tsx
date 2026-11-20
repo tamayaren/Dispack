@@ -170,6 +170,8 @@ export function MessagesTab({ pendingSearch, active }: { pendingSearch: { ids: s
 				</button>
 			</form>
 
+			{app.summary.attachmentsOnly && <p class="load-note">Loaded with "Images and files only": messages without attachments were skipped.</p>}
+
 			{opts.includeIDs.length > 0 && (
 				<div class="scope">
 					<span>

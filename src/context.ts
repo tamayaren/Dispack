@@ -50,6 +50,7 @@ export interface AppCtx {
 	openViewer: (src: ViewerSource) => void;
 	searchIn: (ids: string[], label: string) => void;
 	setTab: (t: Tab) => void;
+	requestGuilds: () => void;
 	requireUserToken: () => string | null;
 	unload: () => void;
 }
